@@ -52,8 +52,8 @@ class Sifter(ABC):
 
 class IncludeSifter(Sifter):
     def __init__(self, needle: Optional[str], regex: bool = False):
-        _pattern: Union[Pattern, str, None] = None
-        self._pattern = _pattern
+        self._pattern: Union[Pattern, str, None] = None
+
         if needle:
             if regex:
                 self._pattern = re.compile(needle)
@@ -89,19 +89,13 @@ T = TypeVar("T", PcsFile, str)
 
 def sift(objs: List[T], sifters: List[Sifter], recursive: bool = False) -> List[T]:
     if sifters:
-
         if recursive:
             # If it is recursive, we ignore to sift dirs.
             obj_dirs = [o for o in objs if isinstance(o, PcsFile) and o.is_dir]
-            objs = [
-                o
-                for o in objs
-                if not isinstance(o, PcsFile) or isinstance(o, PcsFile) and o.is_file
-            ]
+            objs = [o for o in objs if not isinstance(o, PcsFile) or isinstance(o, PcsFile) and o.is_file]
         else:
             obj_dirs = []
 
-        objs = obj_dirs + [
-            obj for obj in objs if all([sifter(obj) for sifter in sifters])
-        ]
+        objs = obj_dirs + [obj for obj in objs if all([sifter(obj) for sifter in sifters])]
+
     return objs

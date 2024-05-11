@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Any, Callable
-from types import SimpleNamespace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 import os
@@ -13,7 +13,11 @@ from baidupcs_py.utils import human_size, human_size_to_int
 from baidupcs_py.common import constant
 from baidupcs_py.common.io import to_decryptio, DecryptIO, READ_SIZE, MAX_CHUNK_SIZE
 from baidupcs_py.common.downloader import MeDownloader
-from baidupcs_py.common.progress_bar import _progress, progress_task_exists
+from baidupcs_py.common.progress_bar import (
+    _progress,
+    init_progress_bar,
+    progress_task_exists,
+)
 from baidupcs_py.commands.sifter import Sifter, sift
 from baidupcs_py.commands.log import get_logger
 from baidupcs_py.commands.display import display_blocked_remotepath
@@ -30,10 +34,12 @@ DEFAULT_CONCURRENCY = 5
 DEFAULT_CHUNK_SIZE = str(MAX_CHUNK_SIZE)
 
 
-class DownloadParams(SimpleNamespace):
+@dataclass
+class DownloadParams:
     concurrency: int = DEFAULT_CONCURRENCY
     chunk_size: str = DEFAULT_CHUNK_SIZE
     quiet: bool = False
+    downloader_params: List[str] = field(default_factory=list)
 
 
 DEFAULT_DOWNLOADPARAMS = DownloadParams()
@@ -104,9 +110,7 @@ class Downloader(Enum):
         logger.debug("`download`: cmd returncode: %s", returncode)
 
         if returncode != 0:
-            print(
-                f"[italic]{self.value}[/italic] fails. return code: [red]{returncode}[/red]"
-            )
+            print(f"[italic]{self.value}[/italic] fails. return code: [red]{returncode}[/red]")
         else:
             if encrypt_password:
                 dio = to_decryptio(open(localpath_tmp, "rb"), encrypt_password)
@@ -143,8 +147,7 @@ class Downloader(Enum):
 
         task_id: Optional[TaskID] = None
         if not downloadparams.quiet:
-            if not _progress.live._started:
-                _progress.start()
+            init_progress_bar()
             task_id = _progress.add_task("MeDownloader", start=False, title=localpath)
 
         def _wrap_done_callback(fut: Future):
@@ -214,6 +217,7 @@ class Downloader(Enum):
             str(downloadparams.concurrency),
             "-k",
             str(chunk_size),
+            *downloadparams.downloader_params,
         ]
         return cmd
 
@@ -240,6 +244,7 @@ class Downloader(Enum):
             str(downloadparams.concurrency),
             "-k",
             downloadparams.chunk_size,
+            *downloadparams.downloader_params,
         ]
         return cmd
 
@@ -254,6 +259,7 @@ class Downloader(Enum):
         directory, filename = os.path.split(localpath)
         cmd = [
             self.which(),
+            url,
             "-c",
             "--dir",
             directory,
@@ -269,7 +275,7 @@ class Downloader(Enum):
             str(downloadparams.concurrency),
             "-k",
             downloadparams.chunk_size,
-            url,
+            *downloadparams.downloader_params,
         ]
         return cmd
 

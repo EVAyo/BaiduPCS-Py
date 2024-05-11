@@ -1,15 +1,17 @@
 typecheck:
-	mypy -p baidupcs_py --ignore-missing-imports --warn-unreachable
+	ruff check baidupcs_py
 
 format-check:
-	black --check .
+	ruff format --check .
 
 format:
-	black .
+	ruff format .
 
 build-pyx:
-	python build.py build_ext --inplace
+	python3 build.py build_ext --inplace
 
+test: build-pyx
+	pytest -s tests/test_common.py
 
 build: all
 	rm -fr dist

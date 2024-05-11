@@ -75,15 +75,15 @@ def from_tos(localpaths: List[str], remotedir: str) -> List[FromTo]:
 
     ft: List[FromTo] = []
     for localpath in localpaths:
-        if not exists(localpath):
+        if not exists(Path(localpath)):
             continue
 
-        if is_file(localpath):
+        if is_file(Path(localpath)):
             remotepath = to_remotepath(os.path.basename(localpath), remotedir)
             ft.append(FromTo(localpath, remotepath))
         else:
             parents_num = max(len(Path(localpath).parts) - 1, 0)
-            for sub_path in walk(localpath):
+            for sub_path in walk(Path(localpath)):
                 relative_path = Path(*Path(sub_path).parts[parents_num:]).as_posix()
                 remotepath = to_remotepath(relative_path, remotedir)
                 ft.append(FromTo(sub_path, remotepath))
@@ -99,6 +99,23 @@ class UploadType(Enum):
 
     One = 1
     Many = 2
+
+
+def _handle_deadly_error(err, fail_count):
+    # If following errors occur, we need to re-upload
+    if isinstance(err, BaiduPCSError) and (
+        err.error_code == 31352  # commit superfile2 failed
+        or err.error_code == 31363  # block miss in superfile2
+        or err.error_code == 31062  # 文件名非法
+        or err.error_code == 31112  # 超出配额
+    ):
+        logger.warning(
+            "Deadly error: %s, fail_count: %s",
+            err,
+            fail_count,
+            exc_info=err,
+        )
+        raise err
 
 
 # remotedir must be a directory
@@ -287,6 +304,7 @@ def _rapid_upload(
         return False
 
 
+@retry(20, except_callback=_handle_deadly_error)
 def _combine_slices(
     api: BaiduPCSApi,
     remotepath: str,
@@ -295,23 +313,7 @@ def _combine_slices(
     local_mtime: int,
     ondup: str,
 ):
-    def _handle_combin_slices_error(err, fail_count):
-        logger.warning(
-            "`_combine_slices`: error: %s, fail_count: %s",
-            err,
-            fail_count,
-            exc_info=err,
-        )
-
-        # If following errors occur, we need to re-upload
-        if (
-            isinstance(err, BaiduPCSError)
-            and err.error_code == 31352  # commit superfile2 failed
-            or err.error_code == 31363  # block miss in superfile2
-        ):
-            raise err
-
-    retry(20, except_callback=_handle_combin_slices_error)(api.combine_slices)(
+    api.combine_slices(
         slice_md5s,
         remotepath,
         local_ctime=local_ctime,
@@ -336,36 +338,38 @@ def upload_one_by_one(
 ):
     """Upload files one by one with uploading the slices concurrently"""
 
-    with _progress:
-        for from_to in from_to_list:
-            task_id = None
-            if show_progress:
-                task_id = _progress.add_task("upload", start=False, title=from_to.from_)
-            upload_file_concurrently(
-                api,
-                from_to,
-                ondup,
-                max_workers=max_workers,
-                encrypt_password=encrypt_password,
-                encrypt_type=encrypt_type,
-                slice_size=slice_size,
-                ignore_existing=ignore_existing,
-                task_id=task_id,
-                user_id=user_id,
-                user_name=user_name,
-                check_md5=check_md5,
-            )
+    for from_to in from_to_list:
+        task_id = None
+        if show_progress:
+            task_id = _progress.add_task("upload", start=False, title=from_to.from_)
+        upload_file_concurrently(
+            api,
+            from_to,
+            ondup,
+            max_workers=max_workers,
+            encrypt_password=encrypt_password,
+            encrypt_type=encrypt_type,
+            slice_size=slice_size,
+            ignore_existing=ignore_existing,
+            task_id=task_id,
+            user_id=user_id,
+            user_name=user_name,
+            check_md5=check_md5,
+        )
 
     logger.debug("======== Uploading end ========")
 
 
 @retry(
     -1,
-    except_callback=lambda err, fail_count: logger.warning(
-        "`upload_file_concurrently`: fails: error: %s, fail_count: %s",
-        err,
-        fail_count,
-        exc_info=err,
+    except_callback=lambda err, fail_count: (
+        _handle_deadly_error(err, fail_count),
+        logger.warning(
+            "`upload_file_concurrently`: fails: error: %s, fail_count: %s",
+            err,
+            fail_count,
+            exc_info=err,
+        ),
     ),
 )
 def upload_file_concurrently(
@@ -416,13 +420,10 @@ def upload_file_concurrently(
     slice256k_md5 = ""
     content_md5 = ""
     content_crc32 = 0
-    io_len = 0
 
     if encrypt_type == EncryptType.No and encrypt_io_len > 256 * constant.OneK:
         # Rapid Upload
-        slice256k_md5, content_md5, content_crc32, io_len = rapid_upload_params(
-            encrypt_io
-        )
+        slice256k_md5, content_md5, content_crc32, _ = rapid_upload_params(encrypt_io)
         ok = _rapid_upload(
             api,
             localpath,
@@ -430,7 +431,7 @@ def upload_file_concurrently(
             slice256k_md5,
             content_md5,
             content_crc32,
-            io_len,
+            encrypt_io_len,
             local_ctime,
             local_mtime,
             ondup,
@@ -458,6 +459,7 @@ def upload_file_concurrently(
             slice_md5 = retry(
                 -1,
                 except_callback=lambda err, fail_count: (
+                    _handle_deadly_error(err, fail_count),
                     io.seek(0, 0),
                     logger.warning(
                         "`upload_file_concurrently`: error: %s, fail_count: %s",
@@ -526,7 +528,7 @@ def upload_file_concurrently(
                 slice256k_md5,
                 content_md5,
                 content_crc32,
-                io_len,
+                encrypt_io_len,
                 encrypt_password=encrypt_password,
                 encrypt_type=encrypt_type.value,
                 user_id=user_id,
@@ -563,44 +565,39 @@ def upload_many(
 
     excepts = {}
     semaphore = Semaphore(max_workers)
-    with _progress:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futs = {}
-            for idx, from_to in enumerate(from_to_list):
-                semaphore.acquire()
-                task_id = None
-                if show_progress:
-                    task_id = _progress.add_task(
-                        "upload", start=False, title=from_to.from_
-                    )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futs = {}
+        for idx, from_to in enumerate(from_to_list):
+            semaphore.acquire()
+            task_id = None
+            if show_progress:
+                task_id = _progress.add_task("upload", start=False, title=from_to.from_)
 
-                logger.debug(
-                    "`upload_many`: Upload: index: %s, task_id: %s", idx, task_id
-                )
+            logger.debug("`upload_many`: Upload: index: %s, task_id: %s", idx, task_id)
 
-                fut = executor.submit(
-                    sure_release,
-                    semaphore,
-                    upload_file,
-                    api,
-                    from_to,
-                    ondup,
-                    encrypt_password=encrypt_password,
-                    encrypt_type=encrypt_type,
-                    slice_size=slice_size,
-                    ignore_existing=ignore_existing,
-                    task_id=task_id,
-                    user_id=user_id,
-                    user_name=user_name,
-                    check_md5=check_md5,
-                )
-                futs[fut] = from_to
+            fut = executor.submit(
+                sure_release,
+                semaphore,
+                upload_file,
+                api,
+                from_to,
+                ondup,
+                encrypt_password=encrypt_password,
+                encrypt_type=encrypt_type,
+                slice_size=slice_size,
+                ignore_existing=ignore_existing,
+                task_id=task_id,
+                user_id=user_id,
+                user_name=user_name,
+                check_md5=check_md5,
+            )
+            futs[fut] = from_to
 
-            for fut in as_completed(futs):
-                e = fut.exception()
-                if e is not None:
-                    from_to = futs[fut]
-                    excepts[from_to] = e
+        for fut in as_completed(futs):
+            e = fut.exception()
+            if e is not None:
+                from_to = futs[fut]
+                excepts[from_to] = e
 
     logger.debug("======== Uploading end ========")
 
@@ -619,11 +616,14 @@ def upload_many(
 
 @retry(
     -1,
-    except_callback=lambda err, fail_count: logger.warning(
-        "`upload_file`: fails: error: %s, fail_count: %s",
-        err,
-        fail_count,
-        exc_info=err,
+    except_callback=lambda err, fail_count: (
+        _handle_deadly_error(err, fail_count),
+        logger.warning(
+            "`upload_file`: fails: error: %s, fail_count: %s",
+            err,
+            fail_count,
+            exc_info=err,
+        ),
     ),
 )
 def upload_file(
@@ -672,13 +672,10 @@ def upload_file(
     slice256k_md5 = ""
     content_md5 = ""
     content_crc32 = 0
-    io_len = 0
 
     if encrypt_type == EncryptType.No and encrypt_io_len > 256 * constant.OneK:
         # Rapid Upload
-        slice256k_md5, content_md5, content_crc32, io_len = rapid_upload_params(
-            encrypt_io
-        )
+        slice256k_md5, content_md5, content_crc32, _ = rapid_upload_params(encrypt_io)
         ok = _rapid_upload(
             api,
             localpath,
@@ -686,7 +683,7 @@ def upload_file(
             slice256k_md5,
             content_md5,
             content_crc32,
-            io_len,
+            encrypt_io_len,
             local_ctime,
             local_mtime,
             ondup,
@@ -710,9 +707,7 @@ def upload_file(
         while True:
             _wait_start()
 
-            logger.debug(
-                "`upload_file`: upload_slice: slice_completed: %s", slice_completed
-            )
+            logger.debug("`upload_file`: upload_slice: slice_completed: %s", slice_completed)
 
             size = min(slice_size, encrypt_io_len - slice_completed)
             if idx != 0 and size == 0:
@@ -721,14 +716,13 @@ def upload_file(
             data = encrypt_io.read(size) or b""
             io = BytesIO(data)
 
-            logger.debug(
-                "`upload_file`: upload_slice: size should be %s == %s", size, len(data)
-            )
+            logger.debug("`upload_file`: upload_slice: size should be %s == %s", size, len(data))
 
             # Retry upload until success
             slice_md5 = retry(
                 -1,
                 except_callback=lambda err, fail_count: (
+                    _handle_deadly_error(err, fail_count),
                     io.seek(0, 0),
                     logger.warning(
                         "`upload_file`: `upload_slice`: error: %s, fail_count: %s",
@@ -769,7 +763,7 @@ def upload_file(
                 slice256k_md5,
                 content_md5,
                 content_crc32,
-                io_len,
+                encrypt_io_len,
                 encrypt_password=encrypt_password,
                 encrypt_type=encrypt_type.value,
                 user_id=user_id,

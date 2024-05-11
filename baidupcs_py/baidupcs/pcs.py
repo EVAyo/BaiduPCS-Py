@@ -4,6 +4,7 @@ from enum import Enum
 
 from pathlib import Path
 from urllib.parse import urlparse, quote_plus
+from urllib.error import HTTPError
 from base64 import standard_b64encode
 import re
 import json
@@ -11,7 +12,7 @@ import time
 import random
 import urllib
 
-import requests
+import requests  # type: ignore
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 
 from baidupcs_py.common.date import now_timestamp
@@ -113,9 +114,7 @@ class BaiduPCS:
         self._logid = None
         self._baiduid = cookies.get("BAIDUID")
         if self._baiduid:
-            self._logid = standard_b64encode(self._baiduid.encode("ascii")).decode(
-                "utf-8"
-            )
+            self._logid = standard_b64encode(self._baiduid.encode("ascii")).decode("utf-8")
 
         self._cookies = cookies
         self._session = requests.Session()
@@ -226,9 +225,7 @@ class BaiduPCS:
         return resp.json()
 
     def meta(self, *remotepaths: str):
-        assert all(
-            [p.startswith("/") for p in remotepaths]
-        ), "`remotepaths` must be absolute paths"
+        assert all([p.startswith("/") for p in remotepaths]), "`remotepaths` must be absolute paths"
 
         param = [{"path": p} for p in remotepaths]
         return self.file_operate("meta", param)
@@ -370,9 +367,7 @@ class BaiduPCS:
         return resp.json()
 
     @assert_ok
-    def upload_slice(
-        self, io: IO, callback: Callable[[MultipartEncoderMonitor], None] = None
-    ):
+    def upload_slice(self, io: IO, callback: Callable[[MultipartEncoderMonitor], None] = None):
         url = PcsNode.File.url()
         params = {
             "method": "upload",
@@ -480,9 +475,7 @@ class BaiduPCS:
     def rename(self, source: str, dest: str):
         """Rename `source` to `dest`"""
 
-        assert all(
-            [p.startswith("/") for p in [source, dest]]
-        ), "`source`, `dest` must be absolute paths"
+        assert all([p.startswith("/") for p in [source, dest]]), "`source`, `dest` must be absolute paths"
 
         param = [_from_to(source, dest)]
         return self.file_operate("move", param)
@@ -517,17 +510,13 @@ class BaiduPCS:
 
     @assert_ok
     def remove(self, *remotepaths: str):
-        assert all(
-            [p.startswith("/") for p in remotepaths]
-        ), "`sources`, `dest` must be absolute paths"
+        assert all([p.startswith("/") for p in remotepaths]), "`sources`, `dest` must be absolute paths"
 
         param = [{"path": p} for p in remotepaths]
         return self.file_operate("delete", param)
 
     @assert_ok
-    def cloud_operate(
-        self, params: Dict[str, str], data: Optional[Dict[str, str]] = None
-    ):
+    def cloud_operate(self, params: Dict[str, str], data: Optional[Dict[str, str]] = None):
         url = PanNode.Cloud.url()
         if data:
             resp = self._request(Method.Post, url, params=params, data=data)
@@ -802,9 +791,7 @@ class BaiduPCS:
         return json.loads(shared_data)
 
     @assert_ok
-    def list_shared_paths(
-        self, sharedpath: str, uk: int, share_id: int, page: int = 1, size: int = 100
-    ):
+    def list_shared_paths(self, sharedpath: str, uk: int, share_id: int, page: int = 1, size: int = 100):
         assert self._stoken, "`STOKEN` is not in `cookies`"
 
         url = PanNode.SharedPathList.url()
@@ -858,7 +845,10 @@ class BaiduPCS:
         hdrs["Referer"] = shared_url  # WARNING: Referer must be set to shared_url
 
         resp = self._request(Method.Post, url, headers=hdrs, params=params, data=data)
-        return resp.json()
+        info = resp.json()
+        if info.get("info") and info["info"][0]["errno"]:
+            info["errno"] = info["info"][0]["errno"]
+        return info
 
     @assert_ok
     def user_info(self):
@@ -881,21 +871,11 @@ class BaiduPCS:
         data["from"] = "mini_ad_wandoujia"
         data["model"] = model
         data["cuid"] = (
-            calu_md5(
-                bduss
-                + "_"
-                + data["_client_version"]
-                + "_"
-                + data["_phone_imei"]
-                + "_"
-                + data["from"]
-            ).upper()
+            calu_md5(bduss + "_" + data["_client_version"] + "_" + data["_phone_imei"] + "_" + data["from"]).upper()
             + "|"
             + phoneIMEIStr[::-1]
         )
-        data["sign"] = calu_md5(
-            "".join([k + "=" + data[k] for k in sorted(data.keys())]) + "tiebaclient!!!"
-        ).upper()
+        data["sign"] = calu_md5("".join([k + "=" + data[k] for k in sorted(data.keys())]) + "tiebaclient!!!").upper()
 
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -906,9 +886,7 @@ class BaiduPCS:
             "Connection": "Keep-Alive",
         }
 
-        resp = requests.post(
-            "http://tieba.baidu.com/c/s/login", headers=headers, data=data
-        )
+        resp = requests.post("http://tieba.baidu.com/c/s/login", headers=headers, data=data)
         return resp.json()
 
     @assert_ok
@@ -953,9 +931,7 @@ class BaiduPCS:
         while True:
             timestamp = str(now_timestamp())
 
-            rand = calu_sha1(
-                enc + uid + "ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF" + timestamp + devuid
-            )
+            rand = calu_sha1(enc + uid + "ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF" + timestamp + devuid)
 
             url = PcsNode.File.url()
             params = {
@@ -982,28 +958,30 @@ class BaiduPCS:
 
             headers = dict(PCS_HEADERS)
             headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
-            req = urllib.request.Request(
-                url + "?" + params_str, headers=headers, method="GET"
-            )
-            resp = urllib.request.urlopen(req)
+            req = urllib.request.Request(url + "?" + params_str, headers=headers, method="GET")  # type: ignore
+            try:
+                resp = urllib.request.urlopen(req)  # type: ignore
 
-            # Error: "user is not authorized"
-            # This error occurs when the method is called by too many times
-            if resp.status != 200:
-                time.sleep(2)
-                continue
+                # Error: "user is not authorized"
+                # This error occurs when the method is called by too many times
+                if resp.status != 200:
+                    time.sleep(2)
+                    continue
 
-            info = json.loads(resp.read())
+                info = json.loads(resp.read())
 
-            # This error is gotten when remote path is blocked
-            if info.get("host") == "issuecdn.baidupcs.com":
+                # This error is gotten when remote path is blocked
+                if info.get("host") == "issuecdn.baidupcs.com":
+                    return None
+
+                if not info.get("urls"):
+                    return None
+                else:
+                    # return info["urls"][0]["url"].replace("&htype=", "")
+                    return info["urls"][0]["url"]
+            except HTTPError:
+                # 403 code could occor at unavailable downloading url, #97
                 return None
-
-            if not info.get("urls"):
-                return None
-            else:
-                # return info["urls"][0]["url"].replace("&htype=", "")
-                return info["urls"][0]["url"]
 
     def file_stream(
         self,

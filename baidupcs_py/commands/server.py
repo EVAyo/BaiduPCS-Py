@@ -1,4 +1,11 @@
-from typing import Optional, Dict
+import sys
+
+if sys.version_info < (3, 9):
+    from typing_extensions import Annotated
+else:
+    from typing import Annotated
+
+from typing import Optional, Dict, Any
 from pathlib import Path
 import os
 import mimetypes
@@ -34,9 +41,7 @@ _username: Optional[str] = None
 _password: Optional[str] = None
 
 # This template is from https://github.com/rclone/rclone/blob/master/cmd/serve/httplib/serve/data/templates/index.html
-_html_tempt: Template = Template(
-    (Path(__file__).parent / "index.html").open(encoding="utf-8").read()
-)
+_html_tempt: Template = Template((Path(__file__).parent / "index.html").open(encoding="utf-8").read())
 
 
 def fake_io(io: RangeRequestIO, start: int = 0, end: int = -1):
@@ -61,7 +66,7 @@ async def handle_request(
 
     remotepath = remotepath.strip("/")
 
-    _rp = join_path(_root_dir, remotepath)
+    _rp = join_path(Path(_root_dir), Path(remotepath))
 
     # Anti path traversal attack
     if not _rp.startswith(_root_dir):
@@ -75,9 +80,7 @@ async def handle_request(
     is_dir = _api.is_dir(_rp)
     if is_dir:
         chunks = ["/"] + (remotepath.split("/") if remotepath != "" else [])
-        navigation = [
-            (i - 1, "../" * (len(chunks) - i), name) for i, name in enumerate(chunks, 1)
-        ]
+        navigation = [(i - 1, "../" * (len(chunks) - i), name) for i, name in enumerate(chunks, 1)]
         pcs_files = _api.list(_rp, desc=desc, name=name, time=time, size=size)
         entries = []
         for f in pcs_files:
@@ -91,18 +94,14 @@ async def handle_request(
                     format_date(f.local_mtime or 0),
                 )
             )
-        cn = _html_tempt.render(
-            root_dir=remotepath, navigation=navigation, entries=entries
-        )
+        cn = _html_tempt.render(root_dir=remotepath, navigation=navigation, entries=entries)
         return HTMLResponse(cn)
     else:
         try:
             fs = _api.file_stream(_rp, encrypt_password=_encrypt_password)
         except Exception as err:
             print("Error:", err)
-            raise HTTPException(
-                status_code=500, detail=f"Error: {err}, remotepath: {_rp}"
-            )
+            raise HTTPException(status_code=500, detail=f"Error: {err}, remotepath: {_rp}")
 
         if not fs:
             raise HTTPException(status_code=404, detail=f"No download link: {_rp}")
@@ -156,15 +155,16 @@ def to_auth(credentials: HTTPBasicCredentials = Depends(_security)) -> str:
 def make_auth_http_server(path: str = ""):
     @app.get("%s/{remotepath:path}" % path)
     async def auth_http_server(
-        username: str = Depends(to_auth), response: Response = Depends(handle_request)
+        username: Annotated[str, Depends(to_auth)], response: Annotated[Any, Depends(handle_request)]
     ):
+        # async def auth_http_server(username: str = Depends(to_auth), response: Response = Depends(handle_request)):
         if username:
             return response
 
 
 def make_http_server(path: str = ""):
     @app.get("%s/{remotepath:path}" % path)
-    async def http_server(response: Response = Depends(handle_request)):
+    async def http_server(response: Annotated[Any, Depends(handle_request)]):
         return response
 
 
@@ -213,9 +213,9 @@ def start_server(
         make_http_server(path)
 
     log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
-    log_config["formatters"]["access"][
-        "fmt"
-    ] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    log_config["formatters"]["access"]["fmt"] = (
+        '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    )
     uvicorn.run(
         "baidupcs_py.commands.server:app",
         host=host,

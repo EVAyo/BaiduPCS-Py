@@ -132,9 +132,7 @@ def display_files(
 
         if highlight and sifters:
             pats: List[Union[Pattern, str]] = list(
-                filter(
-                    None, [sifter.pattern() for sifter in sifters if sifter.include()]
-                )
+                filter(None, [sifter.pattern() for sifter in sifters if sifter.include()])
             )
             highlighter = Highlighter(pats, "yellow")
             _path = highlighter(path)
@@ -297,7 +295,7 @@ def display_shared_links(*shared_links: PcsSharedLink):
 
         if shared_link.expired == -1:
             expired_time = "已经超期"
-        elif shared_link.expired == None or shared_link.expired == 0:
+        elif shared_link.expired is None or shared_link.expired == 0:
             expired_time = "永久"
         else:
             expired_time = format_time(shared_link.expired or 0)
@@ -384,27 +382,25 @@ def display_user_info(user_info: PcsUser):
     console.print(_tempt, highlight=True)
 
 
-def display_user_infos(
-    *user_infos: Tuple[PcsUser, str], recent_user_id: Optional[int] = None
-):
+def display_user_infos(*user_infos: Tuple[PcsUser, str, str], recent_user_id: Optional[int] = None):
     """
     Args:
         user_infos (*Tuple[PcsUser, pwd: str])
     """
 
     table = Table(box=SIMPLE, show_edge=False, highlight=True)
+    table.add_column("Recent", justify="right")
     table.add_column("Index", justify="left")
-    table.add_column("Recent", justify="left")
+    table.add_column("Account Name", justify="left", overflow="fold")
     table.add_column("User Id", justify="left", overflow="fold")
-    table.add_column("User Name", justify="left", overflow="fold")
     table.add_column("Quota", justify="left")
     table.add_column("SVIP", justify="left", overflow="fold")
     table.add_column("VIP", justify="left", overflow="fold")
     table.add_column("Level", justify="left")
     table.add_column("pwd", justify="left", overflow="fold")
 
-    for idx, (user_info, pwd) in enumerate(user_infos, 1):
-        user_id, user_name, auth, age, sex, quota, products, level = user_info
+    for idx, (user_info, pwd, account_name) in enumerate(user_infos, 1):
+        user_id, _, auth, age, sex, quota, products, level = user_info
 
         is_recent = "[green]✔[/green]" if user_id == recent_user_id else ""
 
@@ -426,10 +422,10 @@ def display_user_infos(
                 continue
 
         table.add_row(
-            str(idx),
             is_recent,
+            str(idx),
+            account_name,
             str(user_id),
-            user_name,
             quota_str,
             svip,
             vip,

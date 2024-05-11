@@ -94,9 +94,7 @@ def save_shared(
             _dir_exists.add(rd)
 
         # Ignore existed file
-        if shared_path.is_file and remotepath_exists(
-            api, PurePosixPath(shared_path.path).name, rd
-        ):
+        if shared_path.is_file and remotepath_exists(api, PurePosixPath(shared_path.path).name, rd):
             print(f"[yellow]WARNING[/]: {shared_path.path} has be in {rd}")
             continue
 
@@ -110,30 +108,30 @@ def save_shared(
         assert bdstoken
 
         try:
-            api.transfer_shared_paths(
-                rd, [shared_path.fs_id], uk, share_id, bdstoken, shared_url
-            )
+            api.transfer_shared_paths(rd, [shared_path.fs_id], uk, share_id, bdstoken, shared_url)
             print(f"save: {shared_path.path} to {rd}")
             continue
         except BaiduPCSError as err:
-            if err.error_code not in (12, -33):
-                raise err
-
             if err.error_code == 12:  # 12: "文件已经存在"
+                print(f"[yellow]WARNING[/]: error_code: {err.error_code}, {shared_path.path} has be in {rd}")
+            elif err.error_code == -32:  # -32: "剩余空间不足，无法转存",
+                raise err
+            elif err.error_code in (
+                -33,  # -33: "一次支持操作999个，减点试试吧"
+                4,  # 4: "share transfer pcs error"
+                130,  # "转存文件数超限"
+                120,  # "转存文件数超限"
+            ):
                 print(
-                    f"[yellow]WARNING[/]: error_code: 12, {shared_path.path} has be in {rd}"
-                )
-            if err.error_code == -33:  # -33: '一次支持操作999个，减点试试吧'
-                print(
-                    f"[yellow]WARNING[/]: error_code: -33, {shared_path.path} "
+                    f"[yellow]WARNING[/]: error_code: {err.error_code}, {shared_path.path} "
                     "has more items and need to transfer one by one"
                 )
+            else:
+                raise err
 
         if shared_path.is_dir:
             # Take all sub paths
-            sub_paths = list_all_sub_paths(
-                api, shared_path.path, uk, share_id, bdstoken
-            )
+            sub_paths = list_all_sub_paths(api, shared_path.path, uk, share_id, bdstoken)
 
             rd = (Path(rd) / os.path.basename(shared_path.path)).as_posix()
             for sp in sub_paths:
@@ -152,9 +150,7 @@ def list_all_sub_paths(
     page = 1
     size = 100
     while True:
-        sps = api.list_shared_paths(
-            sharedpath, uk, share_id, bdstoken, page=page, size=size
-        )
+        sps = api.list_shared_paths(sharedpath, uk, share_id, bdstoken, page=page, size=size)
         sub_paths += sps
         if len(sps) < 100:
             break
@@ -193,18 +189,14 @@ def list_shared_paths(
 
         if shared_path.is_dir:
             # Take all sub paths
-            sub_paths = list_all_sub_paths(
-                api, shared_path.path, uk, share_id, bdstoken
-            )
+            sub_paths = list_all_sub_paths(api, shared_path.path, uk, share_id, bdstoken)
             all_shared_paths += sub_paths
             shared_paths.extendleft(sub_paths[::-1])
 
     display_shared_paths(*all_shared_paths)
 
 
-def remotepath_exists(
-    api: BaiduPCSApi, name: str, rd: str, _cache: Dict[str, Set[str]] = {}
-) -> bool:
+def remotepath_exists(api: BaiduPCSApi, name: str, rd: str, _cache: Dict[str, Set[str]] = {}) -> bool:
     names = _cache.get(rd)
     if not names:
         names = set([PurePosixPath(sp.path).name for sp in api.list(rd)])

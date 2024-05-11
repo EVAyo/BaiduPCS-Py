@@ -4,7 +4,7 @@ from baidupcs_py.baidupcs import BaiduPCSApi
 from baidupcs_py.common.io import MAX_CHUNK_SIZE
 from baidupcs_py.commands.display import display_blocked_remotepath
 
-import chardet
+import chardet  # type: ignore
 
 
 def cat(
@@ -26,6 +26,6 @@ def cat(
         else:
             r = chardet.detect(cn)
             if r["confidence"] > 0.5:
-                print(cn.decode(r["encoding"]))
+                print(cn.decode(r["encoding"]))  # type: ignore
             else:
                 print(cn)

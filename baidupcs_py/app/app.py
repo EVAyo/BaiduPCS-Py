@@ -21,7 +21,7 @@ from baidupcs_py.baidupcs import BaiduPCSApi, BaiduPCSError
 from baidupcs_py.baidupcs.inner import PcsRapidUploadInfo
 from baidupcs_py.app.account import Account, AccountManager
 from baidupcs_py.commands.env import ACCOUNT_DATA_PATH, RAPIDUPLOADINFO_PATH
-from baidupcs_py.common.progress_bar import _progress
+from baidupcs_py.common.progress_bar import _progress, init_progress_bar
 from baidupcs_py.common.path import join_path
 from baidupcs_py.common.net import random_avail_port
 from baidupcs_py.common.io import EncryptType
@@ -37,6 +37,7 @@ from baidupcs_py.commands.display import (
     display_user_infos,
 )
 from baidupcs_py.commands.list_files import list_files
+from baidupcs_py.commands.disk_usage import disk_usage
 from baidupcs_py.commands.rapid_upload import (
     rapid_upload_list,
     rapid_upload_search,
@@ -125,7 +126,6 @@ def handle_error(func):
                 console = Console()
                 console.print_exception()
 
-            _teardown()
         except Exception as err:
             _exit_progress_bar()
 
@@ -136,6 +136,8 @@ def handle_error(func):
                 console = Console()
                 console.print_exception()
 
+        finally:
+            _exit_progress_bar()
             _teardown()
 
     return wrap
@@ -145,13 +147,13 @@ def _user_ids(ctx) -> Optional[List[int]]:
     """Select use_ids by their name probes"""
 
     am = ctx.obj.account_manager
-    user_name_probes = ctx.obj.users
+    account_name_probes = ctx.obj.accounts
 
     user_ids = []
     for user_id, account in am._accounts.items():
-        user_name = account.user.user_name
-        for probe in user_name_probes:
-            if probe in user_name:
+        account_name = account.account_name
+        for probe in account_name_probes:
+            if probe in account_name:
                 user_ids.append(user_id)
                 break
     return user_ids
@@ -165,7 +167,7 @@ def _change_account(ctx, user_id: int):
 
 
 def multi_user_do(func):
-    """Run command on multi users"""
+    """Run command on multi accounts"""
 
     @wraps(func)
     def wrap(*args, **kwargs):
@@ -180,12 +182,8 @@ def multi_user_do(func):
             if not accout:
                 continue
 
-            user_name = accout.user.user_name
-            print(
-                "[i yellow]@Do[/i yellow]: "
-                f"user_name: [b]{user_name}[/b], "
-                f"user_id: [b]{user_id}[/b]"
-            )
+            account_name = accout.account_name
+            print("[i yellow]@Do[/i yellow]: " f"account_name: [b]{account_name}[/b], " f"user_id: [b]{user_id}[/b]")
             _change_account(ctx, user_id)
             func(*args, **kwargs)
             print()
@@ -269,6 +267,7 @@ ALIAS = OrderedDict(
         "ua": "useradd",
         "ud": "userdel",
         "ep": "encryptpwd",
+        "an": "accountname",
         # File Operations
         "l": "ls",
         "f": "search",
@@ -327,9 +326,7 @@ _APP_DOC = f"""BaiduPCS App v{__version__}
     如何获取 `bduss` 和 `cookies` 见 https://github.com/PeterDing/BaiduPCS-Py#%E6%B7%BB%E5%8A%A0%E7%94%A8%E6%88%B7
     用 `BaiduPCS-Py {{command}} --help` 查看具体的用法。"""
 
-_ALIAS_DOC = "Command 别名:\n\n\b\n" + "\n".join(
-    [f"{alias: >3} : {cmd}" for alias, cmd in ALIAS.items()]
-)
+_ALIAS_DOC = "Command 别名:\n\n\b\n" + "\n".join([f"{alias: >3} : {cmd}" for alias, cmd in ALIAS.items()])
 
 
 @click.group(cls=AliasedGroup, help=_APP_DOC, epilog=_ALIAS_DOC)
@@ -347,12 +344,12 @@ _ALIAS_DOC = "Command 别名:\n\n\b\n" + "\n".join(
     default=RAPIDUPLOADINFO_PATH,
     help="秒传 sqlite3 文件",
 )
-@click.option("--users", "-u", type=str, default=None, help="用户名片段，用“,”分割")
+@click.option("--accounts", "-u", type=str, default=None, help="帐号名片段，用“,”分割")
 @click.pass_context
-def app(ctx, account_data, rapiduploadinfo_file, users):
+def app(ctx, account_data, rapiduploadinfo_file, accounts):
     ctx.obj.account_manager = AccountManager.load_data(account_data)
     ctx.obj.rapiduploadinfo_file = str(Path(rapiduploadinfo_file).expanduser())
-    ctx.obj.users = [] if users is None else users.split(",")
+    ctx.obj.accounts = [] if accounts is None else accounts.split(",")
 
 
 # Account
@@ -382,22 +379,27 @@ def who(ctx, user_id, show_encrypt_password):
 
 @app.command()
 @click.argument("user_ids", type=int, nargs=-1, default=None, required=False)
+@click.option("--all", is_flag=True, help="更新所有用户信息")
 @click.pass_context
 @handle_error
-def updateuser(ctx, user_ids):
+def updateuser(ctx, user_ids, all):
     """更新用户信息 （默认更新当前用户信息）
 
     也可指定多个 `user_id`
     """
 
-    am = ctx.obj.account_manager
+    am: AccountManager = ctx.obj.account_manager
     if not user_ids:
-        user_ids = [am._who]
+        if all:
+            user_ids = [a.user.user_id for a in am.accounts]
+        else:
+            user_ids = [am._who]
 
     for user_id in user_ids:
         am.update(user_id)
         account = am.who(user_id)
-        display_user_info(account.user)
+        if account:
+            display_user_info(account.user)
 
     am.save()
 
@@ -410,7 +412,7 @@ def su(ctx, user_index):
     """切换当前用户"""
 
     am = ctx.obj.account_manager
-    ls = sorted([(a.user, a.pwd) for a in am.accounts])
+    ls = sorted([(a.user, a.pwd, a.account_name) for a in am.accounts])
     display_user_infos(*ls, recent_user_id=am._who)
 
     if user_index:
@@ -437,18 +439,17 @@ def userlist(ctx):
     """显示所有用户"""
 
     am = ctx.obj.account_manager
-    ls = sorted([(a.user, a.pwd) for a in am.accounts])
+    ls = sorted([(a.user, a.pwd, a.account_name) for a in am.accounts])
     display_user_infos(*ls, recent_user_id=am._who)
 
 
 @app.command()
-@click.option("--bduss", prompt="bduss", hide_input=True, default="", help="用户 bduss")
-@click.option(
-    "--cookies", prompt="cookies", hide_input=True, default="", help="用户 cookies"
-)
+@click.option("--account_name", prompt="Account Name", hide_input=False, default="", help="账号名")
+@click.option("--bduss", prompt="BDUSS", hide_input=True, default="", help="用户 BDUSS")
+@click.option("--cookies", prompt="Cookies", hide_input=True, default="", help="用户 Cookies")
 @click.pass_context
 @handle_error
-def useradd(ctx, bduss, cookies):
+def useradd(ctx, account_name, bduss, cookies):
     """添加一个用户并设置为当前用户"""
 
     if cookies:
@@ -458,9 +459,9 @@ def useradd(ctx, bduss, cookies):
         cookies = {}
     if not bduss:
         raise ValueError("bduss must be specified or be included in cookie")
-    account = Account.from_bduss(bduss, cookies=cookies)
+    account = Account.from_bduss(bduss, cookies=cookies, account_name=account_name)
     am = ctx.obj.account_manager
-    am.useradd(account.user)
+    am.add_account(account)
     am.su(account.user.user_id)
     am.save()
 
@@ -472,7 +473,7 @@ def userdel(ctx):
     """删除一个用户"""
 
     am = ctx.obj.account_manager
-    ls = sorted([(a.user, a.pwd) for a in am.accounts])
+    ls = sorted([(a.user, a.pwd, a.account_name) for a in am.accounts])
     display_user_infos(*ls, recent_user_id=am._who)
 
     indexes = list(str(idx) for idx in range(1, len(ls) + 1))
@@ -481,7 +482,7 @@ def userdel(ctx):
         return
 
     user_id = ls[int(i) - 1][0].user_id
-    am.userdel(user_id)
+    am.delete_account(user_id)
     am.save()
 
     print(f"Delete user {user_id}")
@@ -495,9 +496,7 @@ def userdel(ctx):
     hide_input=True,
     help="加密密码，任意字符",
 )
-@click.option(
-    "--salt", "-s", type=str, default=None, help="加密salt，不限字符 (^v0.5.17 后不使用)"
-)
+@click.option("--salt", "-s", type=str, default=None, help="加密salt，不限字符 (^v0.5.17 后不使用)")
 @click.pass_context
 @handle_error
 def encryptpwd(ctx, encrypt_password, salt):
@@ -507,6 +506,25 @@ def encryptpwd(ctx, encrypt_password, salt):
 
     am = ctx.obj.account_manager
     am.set_encrypt_password(encrypt_password, salt)
+    am.save()
+
+
+@app.command()
+@click.option(
+    "--account-name",
+    "--an",
+    prompt="Account Name",
+    hide_input=False,
+    help="设置账号名，用于指定运行帐号和显示",
+)
+@click.option("--user-id", "-i", type=int, help="指定用户id")
+@click.pass_context
+@handle_error
+def accountname(ctx, account_name, user_id):
+    """设置账号名"""
+
+    am = ctx.obj.account_manager
+    am.set_account_name(account_name, user_id)
     am.save()
 
 
@@ -534,6 +552,7 @@ def pwd(ctx):
 
 
 # }}}
+
 
 # File Operations
 # {{{
@@ -658,6 +677,44 @@ def ls(
 
 
 @app.command()
+@click.argument("remotepaths", nargs=-1, type=str)
+@click.option("--recursive", "-R", is_flag=True, help="递归计算所有文件")
+@click.option("--include", "-I", type=str, help="筛选包含这个字符串的文件")
+@click.option("--include-regex", "--IR", type=str, help="筛选包含这个正则表达式的文件")
+@click.option("--exclude", "-E", type=str, help="筛选 不 包含这个字符串的文件")
+@click.option("--exclude-regex", "--ER", type=str, help="筛选 不 包含这个正则表达式的文件")
+@click.pass_context
+@handle_error
+@multi_user_do
+def du(ctx, remotepaths, recursive, include, include_regex, exclude, exclude_regex):
+    """统计网盘路径下的文件所占用的空间"""
+
+    api = _recent_api(ctx)
+    if not api:
+        return
+
+    sifters = []
+    if include:
+        sifters.append(IncludeSifter(include, regex=False))
+    if include_regex:
+        sifters.append(IncludeSifter(include_regex, regex=True))
+    if exclude:
+        sifters.append(ExcludeSifter(exclude, regex=False))
+    if exclude_regex:
+        sifters.append(ExcludeSifter(exclude_regex, regex=True))
+
+    pwd = _pwd(ctx)
+    remotepaths = (join_path(pwd, r) for r in list(remotepaths) or (pwd,))
+
+    disk_usage(
+        api,
+        *remotepaths,
+        recursive=recursive,
+        sifters=sifters,
+    )
+
+
+@app.command()
 @click.argument("keyword", nargs=1, type=str)
 @click.argument("remotedir", nargs=1, type=str, default="")
 @click.option("--recursive", "-R", is_flag=True, help="递归搜索文件")
@@ -733,9 +790,7 @@ def search(
 @click.argument("remotepath", nargs=1, type=str)
 @click.option("--encoding", "-e", type=str, help="文件编码，默认自动解码")
 @click.option("--no-decrypt", "--ND", is_flag=True, help="不解密")
-@click.option(
-    "--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的"
-)
+@click.option("--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的")
 @click.pass_context
 @handle_error
 @multi_user_do
@@ -876,9 +931,7 @@ def remove(ctx, remotepaths):
 @click.argument("remotepaths", nargs=-1, type=str)
 @click.option("--outdir", "-o", nargs=1, type=str, default=".", help="指定下载本地目录，默认为当前目录")
 @click.option("--recursive", "-R", is_flag=True, help="递归下载")
-@click.option(
-    "--from-index", "-f", type=int, default=0, help="从所有目录中的第几个文件开始下载，默认为0（第一个）"
-)
+@click.option("--from-index", "-f", type=int, default=0, help="从所有目录中的第几个文件开始下载，默认为0（第一个）")
 @click.option("--include", "-I", type=str, help="筛选包含这个字符串的文件")
 @click.option("--include-regex", "--IR", type=str, help="筛选包含这个正则表达式的文件")
 @click.option("--exclude", "-E", type=str, help="筛选 不 包含这个字符串的文件")
@@ -903,6 +956,7 @@ def remove(ctx, remotepaths):
     aria2 (下载 https://github.com/aria2/aria2/releases)
     """,
 )
+@click.option("--downloader-params", "--DP", multiple=True, type=str, help="第三方下载器参数")
 @click.option(
     "--concurrency",
     "-s",
@@ -910,15 +964,11 @@ def remove(ctx, remotepaths):
     default=DEFAULT_CONCURRENCY,
     help="下载同步链接数，默认为5。数子越大下载速度越快，但是容易被百度封锁",
 )
-@click.option(
-    "--chunk-size", "-k", type=str, default=DEFAULT_CHUNK_SIZE, help="同步链接分块大小"
-)
+@click.option("--chunk-size", "-k", type=str, default=DEFAULT_CHUNK_SIZE, help="同步链接分块大小")
 @click.option("--no-decrypt", "--ND", is_flag=True, help="不解密")
 @click.option("--quiet", "-q", is_flag=True, help="取消第三方下载应用输出")
 @click.option("--out-cmd", "--OC", is_flag=True, help="输出第三方下载应用命令")
-@click.option(
-    "--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的"
-)
+@click.option("--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的")
 @click.pass_context
 @handle_error
 @multi_user_do
@@ -933,6 +983,7 @@ def download(
     exclude,
     exclude_regex,
     downloader,
+    downloader_params,
     concurrency,
     chunk_size,
     no_decrypt,
@@ -967,6 +1018,9 @@ def download(
     else:
         encrypt_password = encrypt_password or _encrypt_password(ctx)
 
+    if not quiet and downloader == "me":
+        init_progress_bar()
+
     _download(
         api,
         remotepaths,
@@ -976,7 +1030,7 @@ def download(
         from_index=from_index,
         downloader=getattr(Downloader, downloader),
         downloadparams=DownloadParams(
-            concurrency=concurrency, chunk_size=chunk_size, quiet=quiet
+            concurrency=concurrency, chunk_size=chunk_size, quiet=quiet, downloader_params=downloader_params
         ),
         out_cmd=out_cmd,
         encrypt_password=encrypt_password,
@@ -986,9 +1040,7 @@ def download(
 @app.command()
 @click.argument("remotepaths", nargs=-1, type=str)
 @click.option("--recursive", "-R", is_flag=True, help="递归播放")
-@click.option(
-    "--from-index", "-f", type=int, default=0, help="从所有目录中的第几个文件开始播放，默认为0（第一个）"
-)
+@click.option("--from-index", "-f", type=int, default=0, help="从所有目录中的第几个文件开始播放，默认为0（第一个）")
 @click.option("--include", "-I", type=str, help="筛选包含这个字符串的文件")
 @click.option("--include-regex", "--IR", type=str, help="筛选包含这个正则表达式的文件")
 @click.option("--exclude", "-E", type=str, help="筛选 不 包含这个字符串的文件")
@@ -1016,9 +1068,7 @@ def download(
     is_flag=True,
     help="使用本地服务器播放。大于100MB的媒体文件无法直接播放，需要使用本地服务器播放",
 )
-@click.option(
-    "--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的"
-)
+@click.option("--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的")
 @click.pass_context
 @handle_error
 @multi_user_do
@@ -1065,7 +1115,7 @@ def play(
         encrypt_password = encrypt_password or _encrypt_password(ctx)
 
         host = "localhost"
-        port = random_avail_port(49152, 65535)
+        port = random_avail_port()
 
         local_server = f"http://{host}:{port}"
 
@@ -1116,9 +1166,7 @@ def play(
     default=UploadType.Many.name,
     help="上传方式，Many: 同时上传多个文件，One: 一次只上传一个文件，但同时上传文件的多个分片",
 )
-@click.option(
-    "--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的"
-)
+@click.option("--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的")
 @click.option(
     "--encrypt-type",
     "-e",
@@ -1126,9 +1174,7 @@ def play(
     default=EncryptType.No.name,
     help="文件加密方法，默认为 No 不加密",
 )
-@click.option(
-    "--max-workers", "-w", type=int, default=CPU_NUM, help="同时上传连接数量，默认为 CPU 核数"
-)
+@click.option("--max-workers", "-w", type=int, default=CPU_NUM, help="同时上传连接数量，默认为 CPU 核数")
 @click.option("--no-ignore-existing", "--NI", is_flag=True, help="上传已经存在的文件")
 @click.option("--no-show-progress", "--NP", is_flag=True, help="不显示上传进度")
 @click.option(
@@ -1173,6 +1219,10 @@ def upload(
     user_id, user_name = _recent_user_id_and_name(ctx)
 
     from_to_list = from_tos(localpaths, remotedir)
+
+    if not no_show_progress:
+        init_progress_bar()
+
     _upload(
         api,
         from_to_list,
@@ -1192,9 +1242,7 @@ def upload(
 @app.command()
 @click.argument("localdir", nargs=1, type=str)
 @click.argument("remotedir", nargs=1, type=str)
-@click.option(
-    "--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的"
-)
+@click.option("--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的")
 @click.option(
     "--encrypt-type",
     "-e",
@@ -1259,6 +1307,7 @@ def sync(
 
 
 # }}}
+
 
 # Rapid Upload
 # {{{
@@ -1420,9 +1469,7 @@ def rp(
     if not api:
         return
 
-    assert (
-        link or input_file or all([slice_md5, content_md5, content_length, filename])
-    ), "No params"
+    assert link or input_file or all([slice_md5, content_md5, content_length, filename]), "No params"
 
     pwd = _pwd(ctx)
     remotedir = join_path(pwd, remotedir)
@@ -1462,6 +1509,7 @@ def rp(
 
 
 # }}}
+
 
 # Share
 # {{{
@@ -1576,6 +1624,7 @@ def save(ctx, shared_url, remotedir, password, no_show_vcode):
 
 # }}}
 
+
 # Cloud
 # {{{
 @app.command()
@@ -1687,6 +1736,7 @@ def purgetasks(ctx, yes):
 
 # }}}
 
+
 # Server
 # {{{
 @app.command()
@@ -1695,17 +1745,13 @@ def purgetasks(ctx, yes):
 @click.option("--host", "-h", type=str, default="localhost", help="监听 host")
 @click.option("--port", "-p", type=int, default=8000, help="监听 port")
 @click.option("--workers", "-w", type=int, default=CPU_NUM, help="进程数")
-@click.option(
-    "--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的"
-)
+@click.option("--encrypt-password", "--ep", type=str, default=None, help="加密密码，默认使用用户设置的")
 @click.option("--username", type=str, default=None, help="HTTP Basic Auth 用户名")
 @click.option("--password", type=str, default=None, help="HTTP Basic Auth 密钥")
 @click.pass_context
 @handle_error
 @multi_user_do
-def server(
-    ctx, root_dir, path, host, port, workers, encrypt_password, username, password
-):
+def server(ctx, root_dir, path, host, port, workers, encrypt_password, username, password):
     """开启 HTTP 服务"""
 
     api = _recent_api(ctx)
